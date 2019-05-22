@@ -21,6 +21,12 @@ import (
 	"common"
 	"encoding/hex"
 	"fmt"
+	. "protobuf/block_info_pb2"
+	. "protobuf/seth_pb2"
+	"regexp"
+	"strconv"
+	"strings"
+
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/burrow/acm"
 	"github.com/hyperledger/burrow/acm/state"
@@ -32,8 +38,6 @@ import (
 	"github.com/hyperledger/sawtooth-sdk-go/processor"
 	"github.com/hyperledger/sawtooth-sdk-go/protobuf/processor_pb2"
 	"github.com/hyperledger/sawtooth-sdk-go/protobuf/transaction_pb2"
-	. "protobuf/block_info_pb2"
-	. "protobuf/seth_pb2"
 )
 
 type HandlerResult struct {
@@ -142,9 +146,9 @@ func (self *BurrowEVMHandler) Apply(request *processor_pb2.TpProcessRequest, con
 // -- utilities --
 
 func callVm(sas *SawtoothAppState, sender, receiver *acm.MutableAccount,
-	code, input []byte, gas uint64) ([]byte, uint64, error) {
-	// Create EVM
-	params, err := getParams(sas.mgr.state)
+	code, input []byte, gas uint64, blockspec string) ([]byte, uint64, error) {
+	// Create EVM at the appropriate block height (default to LATEST)
+	params, err := getParams(sas.mgr.state, blockspec)
 	if err != nil {
 		return nil, 0, fmt.Errorf("Block Info Error: %v", err)
 	}
@@ -203,7 +207,7 @@ func unpackHeader(request *processor_pb2.TpProcessRequest) (*transaction_pb2.Tra
 	return header, nil
 }
 
-func getParams(context *processor.Context) (*evm.Params, error) {
+func getParams(context *processor.Context, evmblockspec string) (*evm.Params, error) {
 	blockInfoConfig, err := getBlockInfoConfig(context)
 	if err != nil {
 		logger.Debugf(err.Error())
@@ -217,9 +221,46 @@ func getParams(context *processor.Context) (*evm.Params, error) {
 		}, nil
 	}
 
-	blockInfo, err := getBlockInfo(context, int64(blockInfoConfig.GetLatestBlock()))
-	if err != nil {
-		return nil, fmt.Errorf("Failed to get block info: %v", err.Error())
+	// FInd the right EVM state for the requested blockheight
+	var blockInfo *BlockInfo
+	lbs := strings.ToLower(evmblockspec)
+	switch lbs {
+	case "latest":
+		blockInfo, err = getBlockInfo(context, blockInfoConfig.GetLatestBlock())
+		if err != nil {
+			return nil, fmt.Errorf("Failed to get block info for LATEST block: %v", err.Error())
+		}
+		break
+
+	case "earliest":
+		blockInfo, err = getBlockInfo(context, 0)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to get block info for EARLIEST block: %v", err.Error())
+		}
+		break
+
+	case "pending":
+		// No suport for "pending" in Seth at large, so don't try here
+		return nil, fmt.Errorf("PENDING blockspec is not supported")
+
+	default:
+		// Verify it starts with "0x", then strip it and convert to uint64 with error checking
+		matched, err := regexp.MatchString(`^0x[0-9a-f]+$`, lbs)
+		if matched == false {
+			if err != nil {
+				return nil, fmt.Errorf("Failed to parse blockspec '%s' as valid hex string: %v", evmblockspec, err.Error())
+			} else {
+				return nil, fmt.Errorf("Failed to parse blockspec '%s' as valid hex string", evmblockspec)
+			}
+		}
+
+		unprefixed := strings.Replace(lbs, "0x", "", -1)
+		blocknum, _ := strconv.ParseUint(unprefixed, 16, 64)
+		blockInfo, err = getBlockInfo(context, blocknum)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to get block info for specified block '%s': %v", evmblockspec, err.Error())
+		}
+		break
 	}
 
 	hash, err := StringToWord256(blockInfo.GetHeaderSignature())
@@ -256,7 +297,7 @@ func getBlockInfoConfig(context *processor.Context) (*BlockInfoConfig, error) {
 	return entry, nil
 }
 
-func getBlockInfo(context *processor.Context, blockNumber int64) (*BlockInfo, error) {
+func getBlockInfo(context *processor.Context, blockNumber uint64) (*BlockInfo, error) {
 	// Create block info address
 	blockInfoAddr, err := common.NewBlockInfoAddr(blockNumber)
 	if err != nil {

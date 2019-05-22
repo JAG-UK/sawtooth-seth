@@ -209,8 +209,11 @@ func (s *SawtoothAppState) SetStorage(address crypto.Address, key, value binary.
 	return nil
 }
 
+// FIXME: Older versions of Burrow require int64 type in the function signature, as legacy into Tendermint,
+// but block numbers should really be unsigned throughoiut.  This needs to be corrected (and cast removed)
+// when we update the dependencies to a later core Burrow (STL-1657, STL-1658)
 func (s *SawtoothAppState) GetBlockHash(blockNumber int64) (binary.Word256, error) {
-	blockInfo, err := getBlockInfo(s.mgr.state, blockNumber)
+	blockInfo, err := getBlockInfo(s.mgr.state, uint64(blockNumber))
 	if err != nil {
 		return binary.Zero256, fmt.Errorf("Failed to get block info: %v", err.Error())
 	}

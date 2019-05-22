@@ -447,6 +447,7 @@ impl<S: MessageSender> ValidatorClient<S> {
         transaction_ids: &[String],
     ) -> Result<HashMap<String, SethReceipt>, Error> {
         let mut request = ClientReceiptGetRequest::new();
+
         request.set_transaction_ids(protobuf::RepeatedField::from_vec(Vec::from(
             transaction_ids,
         )));
@@ -472,8 +473,10 @@ impl<S: MessageSender> ValidatorClient<S> {
             .iter()
             .map(SethReceipt::from_receipt_pb)
             .collect::<Result<Vec<SethReceipt>, Error>>()?;
+
         let mut seth_receipt_map = HashMap::with_capacity(seth_receipt_list.len());
         for receipt in seth_receipt_list {
+            info!("Adding another receipts to the return");
             seth_receipt_map.insert(receipt.transaction_id.clone(), receipt);
         }
 

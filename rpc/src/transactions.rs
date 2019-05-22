@@ -21,8 +21,8 @@ use protobuf;
 use messages::seth::{
     CreateContractAccountTxn as CreateContractAccountTxnPb,
     CreateExternalAccountTxn as CreateExternalAccountTxnPb, MessageCallTxn as MessageCallTxnPb,
-    SetPermissionsTxn as SetPermissionsTxnPb, SethTransaction as SethTrasactionPb,
-    SethTransactionReceipt, SethTransaction_TransactionType,
+    SetPermissionsTxn as SetPermissionsTxnPb, ReadOnlyMessageCallTxn as ReadOnlyMessageCallTxnPb,
+    SethTransaction as SethTrasactionPb, SethTransactionReceipt, SethTransaction_TransactionType,
 };
 
 use sawtooth_sdk::messages::events::{Event, Event_Attribute};
@@ -38,6 +38,7 @@ pub enum SethTransaction {
     CreateContractAccount(CreateContractAccountTxnPb),
     MessageCall(MessageCallTxnPb),
     SetPermissions(SetPermissionsTxnPb),
+    ReadOnlyMessageCall(ReadOnlyMessageCallTxnPb),
 }
 
 impl SethTransaction {
@@ -54,6 +55,9 @@ impl SethTransaction {
             }
             SethTransaction_TransactionType::SET_PERMISSIONS => {
                 Some(SethTransaction::SetPermissions(txn.take_set_permissions()))
+            }
+            SethTransaction_TransactionType::READ_ONLY_MESSAGE_CALL => {
+                Some(SethTransaction::ReadOnlyMessageCall(txn.take_read_only_message_call()))
             }
             _ => None,
         }
@@ -77,6 +81,10 @@ impl SethTransaction {
             SethTransaction::SetPermissions(ref inner) => {
                 txn.set_transaction_type(SethTransaction_TransactionType::SET_PERMISSIONS);
                 txn.set_set_permissions(inner.clone());
+            }
+            SethTransaction::ReadOnlyMessageCall(ref inner) => {
+                txn.set_transaction_type(SethTransaction_TransactionType::READ_ONLY_MESSAGE_CALL);
+                txn.set_read_only_message_call(inner.clone());
             }
         }
         txn
@@ -124,6 +132,7 @@ impl Transaction {
             SethTransaction::CreateContractAccount(ref txn) => txn.nonce,
             SethTransaction::MessageCall(ref txn) => txn.nonce,
             SethTransaction::SetPermissions(ref txn) => txn.nonce,
+            SethTransaction::ReadOnlyMessageCall(_) => 0,
         }
     }
 
@@ -133,6 +142,7 @@ impl Transaction {
             SethTransaction::CreateContractAccount(ref txn) => Some(txn.gas_limit),
             SethTransaction::MessageCall(ref txn) => Some(txn.gas_limit),
             SethTransaction::SetPermissions(_) => None,
+            SethTransaction::ReadOnlyMessageCall(ref txn) => Some(txn.gas_limit),
         }
     }
 
@@ -149,6 +159,7 @@ impl Transaction {
             SethTransaction::CreateContractAccount(_) => None,
             SethTransaction::MessageCall(ref txn) => Some(transform::bytes_to_hex_str(&txn.to)),
             SethTransaction::SetPermissions(ref txn) => Some(transform::bytes_to_hex_str(&txn.to)),
+            SethTransaction::ReadOnlyMessageCall(ref txn) => Some(transform::bytes_to_hex_str(&txn.to)),
         }
     }
 
@@ -158,6 +169,7 @@ impl Transaction {
             SethTransaction::CreateContractAccount(_) => None,
             SethTransaction::MessageCall(ref txn) => Some(transform::bytes_to_hex_str(&txn.data)),
             SethTransaction::SetPermissions(_) => None,
+            SethTransaction::ReadOnlyMessageCall(ref txn) => Some(transform::bytes_to_hex_str(&txn.data)),
         }
     }
 }

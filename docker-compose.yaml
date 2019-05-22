@@ -165,7 +165,7 @@ services:
       - 3030:3030
     command: |
       bash -c "
-        seth-rpc --connect tcp://validator:4004 --bind 0.0.0.0:3030
+        seth-rpc -vv --connect tcp://validator:4004 --bind 0.0.0.0:3030
       "
 
 volumes:

@@ -15,11 +15,11 @@
  * ------------------------------------------------------------------------------
  */
 
-use client::{BlockKey, Error as ClientError, ValidatorClient};
+use client::{BlockKey, BlockKeyParseError, Error as ClientError, ValidatorClient};
 use error;
 use jsonrpc_core::{Error, ErrorCode, Params, Value};
 use messages::seth::{
-    CreateContractAccountTxn as CreateContractAccountTxnPb, MessageCallTxn as MessageCallTxnPb,
+    CreateContractAccountTxn as CreateContractAccountTxnPb, MessageCallTxn as MessageCallTxnPb, ReadOnlyMessageCallTxn as ReadOnlyMessageCallTxnPb,
 };
 use protobuf;
 use requests::RequestHandler;
@@ -27,10 +27,13 @@ use sawtooth_sdk::messages::block::BlockHeader;
 use sawtooth_sdk::messaging::stream::MessageSender;
 use serde_json::Map;
 use std::str::FromStr;
+use std::time;
+use std::thread;
 use tiny_keccak;
 use transactions::{SethTransaction, TransactionKey};
 use transform;
 use transform::{make_txn_obj, make_txn_obj_no_block, make_txn_receipt_obj};
+
 
 pub fn get_method_list<T>() -> Vec<(String, RequestHandler<T>)>
 where
@@ -393,8 +396,15 @@ where
     T: MessageSender,
 {
     info!("eth_estimateGas");
-    // Implementing this requires running the EVM, which is not possible within the RPC.
-    Err(error::not_implemented())
+
+    // The official Seth documentation says that everything costs 0 gas and we should
+    // use permissioning instead.  In which case, this should always just return 0 in exactly
+    // the same way that gas_price() already does.
+    //
+    // Note that the official Ethereum spec for this is to run the command on the local
+    // VM (much like eth_call()) and return the amount of local gas consumed, but that
+    // seems like a waste of time for a Seth system
+    Ok(Value::String(format!("{:#x}", 0)))    
 }
 
 pub fn sign<T>(params: Params, client: ValidatorClient<T>) -> Result<Value, Error>
@@ -449,13 +459,151 @@ where
     Ok(transform::hex_prefix(&signature))
 }
 
-pub fn call<T>(_: Params, _: ValidatorClient<T>) -> Result<Value, Error>
+// Support function for eth_call().  C+H from accounts module, should be refactored
+fn validate_block_key(block: &str) -> Result<BlockKey, Error> {
+    match block.parse() {
+        Ok(k) => Ok(k),
+        Err(BlockKeyParseError::Invalid) => {
+            Err(Error::invalid_params("Failed to parse block number"))
+        }
+        Err(BlockKeyParseError::Unsupported) => Err(error::not_implemented()),
+    }
+}
+
+pub fn call<T>(params: Params, client: ValidatorClient<T>) -> Result<Value, Error>
 where
     T: MessageSender,
 {
     info!("eth_call");
-    // Implementing this requires running the EVM, which is not possible within the RPC.
-    Err(error::not_implemented())
+
+    // According to the Ethereum RPC docs, the block tag is mandatory, but many clients
+    // and samples seem to omit it, and Truffle/Ganache (for one) accepts just the txn
+    // params and assumes "latest".  This makes it mandatory (compliant with the spec and
+    // go-ethereum generated code) which may cause problems with some clients.
+    let (txn, block): (Map<String, Value>, String) = params
+        .parse()
+        .map_err(|_| Error::invalid_params("Takes [txn: OBJECT, TAG|QUANTITY]"))?;
+
+    // FIXME: Make it so that 'block' is optional, and default it to "latest"
+
+    // Required arguments. 
+    let to = 
+        transform::get_bytes_from_map(&txn, "to").map_err(|_| Error::new(ErrorCode::ParseError))?;
+    let key = validate_block_key(&block)?;
+    
+    // Convert blockspec to an explicit block number so we run the comntract against the
+    // correct version of history on the other side
+    let rqblocknum;
+    match key {
+        BlockKey::Latest => {
+            //Get latest block number to pass in
+            let block = client.get_current_block().map_err(|err| {
+                error!("Error requesting block: {:?}", err);
+                Error::internal_error()
+            })?;
+
+            let block_header: BlockHeader = match protobuf::parse_from_bytes(&block.header) {
+                Ok(r) => r,
+                Err(error) => {
+                    error!("Error parsing block header: {:?}", error);
+                    return Err(Error::internal_error());
+                }
+            };
+
+            rqblocknum = block_header.block_num;
+        },
+        BlockKey::Earliest => {
+            rqblocknum = 0;
+        },
+        BlockKey::Number(n) => {
+            info!("Using specified block {}", n);
+            rqblocknum = n;
+        },
+        _ => return Err(Error::invalid_params("Unsupported Block Key identifier")),
+    }
+
+    // According to Ethereum JSON RPC docs only 'to' and block tag are required, but
+    // for the Seth machinery we also want 'from' and 'data'...otherwise what
+    // would the defaults be that we'd set in the Optional section?
+    let from = transform::get_string_from_map(&txn, "from")
+        .map_err(|_| Error::new(ErrorCode::ParseError))
+        .and_then(|f| f.ok_or_else(|| Error::invalid_params("`from` not set")))?;
+    let data = transform::get_bytes_from_map(&txn, "data")
+        .map_err(|_| Error::new(ErrorCode::ParseError))
+        .and_then(|f| f.ok_or_else(|| Error::invalid_params("`data` not set")))?;
+
+    // Optional arguments
+    // Note @gas@ has no effect in eth_call but is allowed for compatibilty with certain clients
+    let gas = transform::get_u64_from_map(&txn, "gas")
+        .map(|g| g.unwrap_or(90_000))
+        .map_err(|_| Error::new(ErrorCode::ParseError))?;
+    let gas_price = transform::get_u64_from_map(&txn, "gasPrice")
+        .map(|g| g.unwrap_or(10_000_000_000_000))
+        .map_err(|_| Error::new(ErrorCode::ParseError))?;
+    let value = transform::get_u64_from_map(&txn, "value")
+        .map(|g| g.unwrap_or(0))
+        .map_err(|_| Error::new(ErrorCode::ParseError))?;
+
+    let txn = if let Some(to) = to {
+        let mut txn = ReadOnlyMessageCallTxnPb::new();
+        txn.set_to(to);
+        txn.set_data(data);
+        txn.set_gas_limit(gas);
+        txn.set_gas_price(gas_price);
+        txn.set_value(value);
+        txn.set_block_num(rqblocknum);
+        SethTransaction::ReadOnlyMessageCall(txn) 
+    } else {
+        // Contract Creation is not valid in eth_call because it doesn't modify state
+        return Err(Error::invalid_params("Cannot create contract in eth_call()"));
+    };
+
+    let txn_hash = client.send_transaction(&from, &txn).map_err(|error| {
+        error!("{:?}", error);
+        Error::internal_error()
+    })?;
+
+    let receipt_id = format!("{}", txn_hash);
+
+    // Now instead of returning the transaction hash, we immediately redeem it and
+    // pull out the result.  We already have working machinery for this in the form of
+    // getTransactionReceipt but I don't want to wire straight into the public call
+    // machinery because we would have to hand-roll a new jsonrpc-core Params structure,
+    // only for it to be unwrapped again.
+    let mut wait_backoff = 0;
+    let max_wait_backoff = 20;
+    let wait_length = 50; //milliseconds
+    loop {
+        thread::sleep(time::Duration::from_millis(wait_length));
+
+        let _receipt = match client.get_receipts(&[receipt_id.clone()]) {
+            Err(ClientError::NoResource) => {
+                if wait_backoff < max_wait_backoff {
+                    wait_backoff += 1;
+                    debug!("No matching receipt found.  Waiting up to {} more times...", max_wait_backoff - wait_backoff);
+                    //This could just be a race with the VM/seth-tp process.  Give it a moment to complete
+                    continue;
+                } else {
+                    debug!("No matching receipt found for eth_call call, even after waiting.  Assuming empty return.");
+                    return Ok(Value::Null);
+                }
+            },
+            Err(error) => {
+                error!("Error getting receipt for txn `{}`: {}", receipt_id, error);
+                return Err(Error::internal_error());
+            }
+            Ok(mut map) => match map.remove(&receipt_id) {
+                Some(r) => {
+                    let prefixed = format!("0x{}", r.return_value);
+                    return Ok(Value::String(prefixed))
+                },
+                None => {
+                    error!("Receipt map is missing txn_id `{}`", receipt_id);
+                    return Err(Error::internal_error());
+                }
+            }
+        };
+    } // END loop
 }
 
 // Always return false

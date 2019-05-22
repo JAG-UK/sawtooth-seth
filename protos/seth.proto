@@ -61,6 +61,7 @@ message SethTransaction {
       CREATE_CONTRACT_ACCOUNT = 2;
       MESSAGE_CALL = 3;
       SET_PERMISSIONS = 4;
+      READ_ONLY_MESSAGE_CALL = 5;
     }
     TransactionType transaction_type = 1;
 
@@ -71,6 +72,7 @@ message SethTransaction {
     CreateContractAccountTxn create_contract_account = 3;
     MessageCallTxn message_call = 4;
     SetPermissionsTxn set_permissions = 5;
+    ReadOnlyMessageCallTxn read_only_message_call = 6;
 }
 
 // The following transactions have fields that correspond to the transaction
@@ -122,6 +124,38 @@ message CreateContractAccountTxn {
 message MessageCallTxn {
     // "...the number of transactions sent by the sender; formally T_n."
     uint64 nonce = 1;
+
+    // "...the number of Wei to be paid per unit of gas for all computation
+    // costs incurred as a result of the execution of this transaction;
+    // formally T_p."
+    uint64 gas_price = 2;
+
+    // "...the maximum amount of gas that should be used in executing this
+    // transaction. This is paid up-front, before any computation is done and
+    // may not be increased later; formally T_g"
+    uint64 gas_limit = 3;
+
+    // "...the 160-bit address of the message call's recipient or, for a
+    // contract creation transaction, ∅, used here to denote (the empty byte
+    // array); formally T_t."
+    bytes to = 4;
+
+    // "...the number of Wei to be transferred to the message call's recipient
+    // or, in the case of contract creation, as an endowment to the newly
+    // created account; formally T_v."
+    uint64 value = 5;
+
+    // "An unlimited size byte array specifying the input data of the message
+    // call, formally T_d."
+    //
+    // This should only be set if this is a message call transaction.
+    bytes data = 6;
+}
+
+message ReadOnlyMessageCallTxn {
+    // The block Number (i.o.w. 'historical state') against which to run 
+    // the contract call
+    uint64 block_num = 1;
 
     // "...the number of Wei to be paid per unit of gas for all computation
     // costs incurred as a result of the execution of this transaction;

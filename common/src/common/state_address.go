@@ -50,9 +50,9 @@ func NewStateAddrFromString(s string) (sa StateAddr, err error) {
 	return NewStateAddrFromBytes(bytes)
 }
 
-func NewBlockInfoAddr(n int64) (StateAddr, error) {
+func NewBlockInfoAddr(n uint64) (StateAddr, error) {
 	buf := [8]byte{}
-	binary.PutInt64BE(buf[:], n)
+	binary.PutUint64BE(buf[:], n)
 	bytes := binary.LeftPadBytes(buf[:], 31)
 	return StateAddr(BLOCK_INFO_NAMESPACE + hex.EncodeToString(bytes)), nil
 }

@@ -20,13 +20,14 @@ import (
 	. "common"
 	"encoding/hex"
 	"fmt"
+	. "protobuf/seth_pb2"
+	"strings"
+
 	"github.com/hyperledger/burrow/acm"
 	"github.com/hyperledger/burrow/crypto"
 	"github.com/hyperledger/burrow/execution/evm"
 	"github.com/hyperledger/burrow/permission"
 	"github.com/hyperledger/sawtooth-sdk-go/processor"
-	. "protobuf/seth_pb2"
-	"strings"
 )
 
 var TxnHandlers = map[SethTransaction_TransactionType]TransactionHandler{
@@ -34,6 +35,7 @@ var TxnHandlers = map[SethTransaction_TransactionType]TransactionHandler{
 	SethTransaction_CREATE_CONTRACT_ACCOUNT: CreateContractAccount,
 	SethTransaction_MESSAGE_CALL:            MessageCall,
 	SethTransaction_SET_PERMISSIONS:         SetPermissions,
+	SethTransaction_READ_ONLY_MESSAGE_CALL:  ReadOnlyMessageCall,
 }
 
 func CreateExternalAccount(wrapper *SethTransaction, sender *EvmAddr, sapps *SawtoothAppState) HandlerResult {
@@ -283,7 +285,7 @@ func CreateContractAccount(wrapper *SethTransaction, sender *EvmAddr, sapps *Saw
 	newAcct := acm.AsMutableAccount(sapps.CreateAccount(senderAcct))
 
 	// Initialize the new account
-	out, gasUsed, err := callVm(sapps, newAcct, nil, txn.GetInit(), nil, txn.GetGasLimit())
+	out, gasUsed, err := callVm(sapps, newAcct, nil, txn.GetInit(), nil, txn.GetGasLimit(), "latest")
 	if err != nil {
 		return HandlerResult{
 			Error: &processor.InvalidTransactionError{Msg: fmt.Sprintf(
@@ -411,6 +413,7 @@ func MessageCall(wrapper *SethTransaction, sender *EvmAddr, sapps *SawtoothAppSt
 		receiverAcct.Code().Bytes(),
 		txn.GetData(),
 		txn.GetGasLimit(),
+		"latest",
 	)
 
 	if err != nil {
@@ -425,6 +428,87 @@ func MessageCall(wrapper *SethTransaction, sender *EvmAddr, sapps *SawtoothAppSt
 
 	sapps.UpdateAccount(senderAcct)
 	sapps.UpdateAccount(receiverAcct)
+
+	return HandlerResult{
+		ReturnValue: out,
+		GasUsed:     gasUsed,
+	}
+}
+
+func ReadOnlyMessageCall(wrapper *SethTransaction, sender *EvmAddr, sapps *SawtoothAppState) HandlerResult {
+	txn := wrapper.GetReadOnlyMessageCall()
+
+	// The sender account must already exist
+	// FIXME this is not strictly true.  According to the Ethereum docs the 'from' address
+	// is optional
+	senderAcctRef, err := sapps.GetAccount(crypto.AddressFromWord256(sender.ToWord256()))
+	senderAcct := acm.AsMutableAccount(senderAcctRef)
+	if senderAcct == nil {
+		return HandlerResult{
+			Error: &processor.InvalidTransactionError{Msg: fmt.Sprintf(
+				"Sender account must already exist to message call: %v", sender,
+			)},
+		}
+	}
+
+	// Verify this account has permission to make message calls
+	// FIXME this is not strictly true.  According to the Ethereum docs the 'from' address
+	// is optional so this check needs to be modified slightly to handle unsepcified callers
+	// and unrestricted calls
+	if !evm.HasPermission(sapps, senderAcct, permission.Call) {
+		return HandlerResult{
+			Error: &processor.InvalidTransactionError{Msg: fmt.Sprintf(
+				"Sender account does not have permission to make message calls: %v",
+				sender,
+			)},
+		}
+	}
+
+	receiver, err := NewEvmAddrFromBytes(txn.GetTo())
+	if err != nil {
+		return HandlerResult{
+			Error: &processor.InvalidTransactionError{Msg: fmt.Sprintf(
+				"Failed to construct receiver address for message call: %v", txn.GetTo(),
+			)},
+		}
+	}
+
+	receiverAcct, err := sapps.GetAccount(crypto.AddressFromWord256(receiver.ToWord256()))
+	if err != nil {
+		return HandlerResult{
+			Error: &processor.InvalidTransactionError{Msg: fmt.Sprintf(
+				"Error while retrieving receiver account: %v", err,
+			)},
+		}
+	}
+
+	// Receiving account must exist to call it
+	if receiverAcct == nil {
+		return HandlerResult{
+			Error: &processor.InvalidTransactionError{Msg: fmt.Sprintf(
+				"Receiver account must already exist to call it: %v", receiver,
+			)},
+		}
+	}
+
+	// Execute the contract
+	out, gasUsed, err := callVm(
+		sapps,
+		acm.AsMutableAccount(senderAcct),
+		acm.AsMutableAccount(receiverAcct),
+		receiverAcct.Code().Bytes(),
+		txn.GetData(),
+		txn.GetGasLimit(),
+		fmt.Sprintf("0x%0x", txn.GetBlockNum()),
+	)
+
+	if err != nil {
+		return HandlerResult{
+			Error: &processor.InvalidTransactionError{Msg: err.Error()},
+		}
+	}
+	logger.Debug("Gas Used: ", gasUsed)
+	logger.Debug("EVM Output: ", strings.ToLower(hex.EncodeToString(out)))
 
 	return HandlerResult{
 		ReturnValue: out,
